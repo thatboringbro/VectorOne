@@ -1,4 +1,5 @@
 using System.IO;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text.Json;
 
@@ -7,6 +8,8 @@ namespace VectorOne;
 public class Worker : BackgroundService
 {
     private readonly ILogger<Worker> _logger;
+    private static readonly HttpClient _httpClient = new HttpClient();
+    private const string TARGET_API_URL = "http://127.0.0.1:8000/api/telemetry";
 
     public Worker(ILogger<Worker> logger)
     {
@@ -36,7 +39,6 @@ public class Worker : BackgroundService
             _logger.LogWarning("VectorOne ALERT: New file created -> {path}", e.FullPath);
             getDetails(e.FullPath);
         };
-
         
         watcher.EnableRaisingEvents = true;
         _logger.LogInformation("VectorOne watcher active on: {path}", downloadFolder);
@@ -49,7 +51,7 @@ public class Worker : BackgroundService
         
     }
 
-    void getDetails(string filePath)
+    async Task getDetails(string filePath)
     {
         try
         {
@@ -77,7 +79,10 @@ public class Worker : BackgroundService
             };
 
             string json = JsonSerializer.Serialize(fileData, new JsonSerializerOptions { WriteIndented = true });
+            
             _logger.LogInformation("File details extracted:\n{details}", json);
+
+            await PostTelemetry(json);
         }
         catch (Exception ex)
         {
@@ -85,6 +90,29 @@ public class Worker : BackgroundService
         }
 
     }
-    
+
+    private async Task PostTelemetry(string jsonPayload)
+    {
+        try
+        {
+            var content = new StringContent(jsonPayload, System.Text.Encoding.UTF8, "application/json");
+            _logger.LogInformation("Sending telemetry for analysis...");
+            HttpResponseMessage response = await _httpClient.PostAsync(TARGET_API_URL, content);
+
+            if (response.IsSuccessStatusCode)
+            {
+                string responseBody = await response.Content.ReadAsStringAsync();
+                _logger.LogInformation($"Telemetry sent! \nVerdict: {responseBody}");
+            }
+            else
+            {
+                _logger.LogWarning("An error occured.");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"Connection failed. Reason: {ex.Message}");
+        }
+    }
     
 }
