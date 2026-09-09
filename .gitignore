@@ -7,3 +7,5 @@ riderModule.iml
 Thumbs.db
 .idea/
 *.user
+venv/
+__pycache__/
