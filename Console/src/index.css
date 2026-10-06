@@ -1,0 +1,4 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+
+:root{font-family:'IBM Plex Sans',Arial,sans-serif;color:#d8dde1;background:#101316;font-synthesis:none;text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;font-optical-sizing:auto;font-weight:400;--mono:'IBM Plex Mono',Consolas,monospace;--sans:'IBM Plex Sans',Arial,sans-serif;font-size:14px;font-kerning:normal;letter-spacing:0}
+*{box-sizing:border-box}html{overflow-x:clip}body{margin:0;min-width:320px;min-height:100vh}button,input,select{font:inherit}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #65c69f;outline-offset:2px}::selection{background:#315447;color:#effff8}#root{min-height:100vh}

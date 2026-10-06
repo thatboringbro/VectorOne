@@ -1,6 +1,8 @@
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace VectorOne;
 
@@ -8,8 +10,19 @@ public class Worker : BackgroundService
 {
     private readonly ILogger<Worker> _logger;
     private static readonly HttpClient _httpClient = new HttpClient();
-    private const string DefaultApiUrl = "http://127.0.0.1:8000/api/telemetry";
-    private static readonly string TargetApiUrl = Environment.GetEnvironmentVariable("VECTORONE_API_URL") ?? DefaultApiUrl;
+    private const string DefaultApiUrl = "http://127.0.0.1:8080/api/telemetry";
+    private static readonly string? DotEnvPath = FindBackendDotEnv();
+    private static readonly IReadOnlyDictionary<string, string> DotEnvSettings = LoadDotEnv(DotEnvPath);
+    private static readonly string TargetApiUrl = DotEnvSettings.TryGetValue("VECTORONE_API_URL", out var apiUrl)
+        ? apiUrl
+        : DefaultApiUrl;
+    private static readonly string BrainBaseUrl = new Uri(TargetApiUrl).GetLeftPart(UriPartial.Authority);
+    private static readonly string AgentToken = DotEnvSettings.GetValueOrDefault("VECTORONE_AGENT_TOKEN", string.Empty);
+    private static readonly string PendingCommandsUrl = $"{BrainBaseUrl}/api/commands/pending";
+    private static readonly string EndpointHeartbeatUrl = $"{BrainBaseUrl}/api/endpoints/heartbeat";
+    private static readonly string DeviceName = Environment.MachineName;
+    private static readonly string DeviceDomain = OperatingSystem.IsWindows() ? Environment.UserDomainName : string.Empty;
+    private static readonly string DeviceId = $"{DeviceName}@{Environment.UserDomainName}";
     private readonly List<FileSystemWatcher> _watchers = new();
 
     public Worker(ILogger<Worker> logger)
@@ -19,17 +32,20 @@ public class Worker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (string.IsNullOrWhiteSpace(AgentToken))
+        {
+            throw new InvalidOperationException(
+                $"VECTORONE_AGENT_TOKEN is missing from the shared Brain .env file ({DotEnvPath ?? "file not found"}).");
+        }
+
+        var commandPollingTask = PollCommandsAsync(stoppingToken);
+        var endpointHeartbeatTask = SendEndpointHeartbeatsAsync(stoppingToken);
         var watchPaths = GetWatchDirectories();
 
         if (watchPaths.Count == 0)
         {
             _logger.LogWarning("No valid watch directories were found for this user profile. VectorOne will stay idle.");
-
-            while (!stoppingToken.IsCancellationRequested)
-            {
-                await Task.Delay(1000, stoppingToken);
-            }
-
+            await Task.WhenAll(commandPollingTask, endpointHeartbeatTask);
             return;
         }
 
@@ -71,10 +87,7 @@ public class Worker : BackgroundService
             }
         }
 
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            await Task.Delay(1000, stoppingToken);
-        }
+        await Task.WhenAll(commandPollingTask, endpointHeartbeatTask);
     }
 
     public static IReadOnlyList<string> GetWatchDirectories()
@@ -142,7 +155,10 @@ public class Worker : BackgroundService
                 username = userName,
                 filetype = fileExtension,
                 datecreated = dateCreated,
-                filehash = fileHash
+                filehash = fileHash,
+                filepath = fileInfo.FullName,
+                device_name = DeviceName,
+                device_id = DeviceId
             };
 
             var json = JsonSerializer.Serialize(fileData, new JsonSerializerOptions { WriteIndented = true });
@@ -163,7 +179,9 @@ public class Worker : BackgroundService
             using var content = new StringContent(jsonPayload, System.Text.Encoding.UTF8, "application/json");
             _logger.LogInformation("Sending telemetry for analysis...");
 
-            using var response = await _httpClient.PostAsync(TargetApiUrl, content);
+            using var request = CreateAgentRequest(HttpMethod.Post, TargetApiUrl);
+            request.Content = content;
+            using var response = await _httpClient.SendAsync(request);
             var responseBody = await response.Content.ReadAsStringAsync();
 
             if (response.IsSuccessStatusCode)
@@ -179,5 +197,253 @@ public class Worker : BackgroundService
         {
             _logger.LogError(ex, "Connection failed while sending telemetry.");
         }
+    }
+
+    private async Task PollCommandsAsync(CancellationToken stoppingToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(10));
+
+        try
+        {
+            while (await timer.WaitForNextTickAsync(stoppingToken))
+            {
+                await ProcessPendingCommandsAsync(stoppingToken);
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Expected during service shutdown.
+        }
+    }
+
+    private async Task SendEndpointHeartbeatsAsync(CancellationToken stoppingToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(60));
+        try
+        {
+            do
+            {
+                try
+                {
+                    var heartbeat = new
+                    {
+                        device_id = DeviceId,
+                        device_name = DeviceName,
+                        username = Environment.UserName,
+                        os_version = RuntimeInformation.OSDescription,
+                        domain_name = DeviceDomain
+                    };
+                    using var request = CreateAgentRequest(HttpMethod.Post, EndpointHeartbeatUrl);
+                    request.Content = new StringContent(
+                        JsonSerializer.Serialize(heartbeat),
+                        System.Text.Encoding.UTF8,
+                        "application/json");
+                    using var response = await _httpClient.SendAsync(request, stoppingToken);
+                    if (response.IsSuccessStatusCode)
+                    {
+                        _logger.LogInformation("Endpoint inventory heartbeat registered for {deviceName}.", DeviceName);
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Endpoint heartbeat failed with status {statusCode}.", response.StatusCode);
+                    }
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Endpoint heartbeat failed; it will retry in 60 seconds.");
+                }
+            }
+            while (await timer.WaitForNextTickAsync(stoppingToken));
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Expected during service shutdown.
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to register endpoint heartbeat.");
+        }
+    }
+
+    private async Task ProcessPendingCommandsAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            using var request = CreateAgentRequest(HttpMethod.Get, PendingCommandsUrl);
+            using var response = await _httpClient.SendAsync(request, stoppingToken);
+            response.EnsureSuccessStatusCode();
+
+            var responseBody = await response.Content.ReadAsStringAsync(stoppingToken);
+            var commands = JsonNode.Parse(responseBody)?.AsArray();
+            if (commands is null)
+            {
+                _logger.LogWarning("Brain returned an invalid pending-command response.");
+                return;
+            }
+
+            foreach (var command in commands)
+            {
+                var commandId = command?["id"]?.GetValue<int>();
+                var filepath = command?["filepath"]?.GetValue<string>();
+                var action = command?["action"]?.GetValue<string>();
+                if (commandId is null || string.IsNullOrWhiteSpace(filepath) || action is not ("delete" or "quarantine"))
+                {
+                    _logger.LogWarning("Ignoring pending command with missing fields or unsupported action.");
+                    continue;
+                }
+
+                if (!IsWithinWatchedDirectories(filepath))
+                {
+                    _logger.LogCritical("Rejected delete command {commandId} outside watched directories: {path}", commandId, filepath);
+                    continue;
+                }
+
+                try
+                {
+                    File.Delete(filepath);
+                    _logger.LogWarning("Quarantined file from analyst command {commandId}: {path}", commandId, filepath);
+                }
+                catch (IOException ex)
+                {
+                    _logger.LogCritical(ex, "Could not delete file from analyst command {commandId}; it may be locked: {path}", commandId, filepath);
+                    continue;
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    _logger.LogCritical(ex, "Access denied while processing analyst delete command {commandId}: {path}", commandId, filepath);
+                    continue;
+                }
+
+                await CompleteCommandAsync(commandId.Value, stoppingToken);
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to poll or process pending Brain commands.");
+        }
+    }
+
+    private async Task CompleteCommandAsync(int commandId, CancellationToken stoppingToken)
+    {
+        try
+        {
+            using var request = CreateAgentRequest(
+                HttpMethod.Post,
+                $"{BrainBaseUrl}/api/commands/complete/{commandId}");
+            using var response = await _httpClient.SendAsync(request, stoppingToken);
+            response.EnsureSuccessStatusCode();
+            _logger.LogInformation("Completed analyst command {commandId}.", commandId);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !stoppingToken.IsCancellationRequested)
+        {
+            _logger.LogError(ex, "Failed to acknowledge completed command {commandId}.", commandId);
+        }
+    }
+
+    private static bool IsWithinWatchedDirectories(string filepath)
+    {
+        string fullPath;
+        try
+        {
+            fullPath = Path.GetFullPath(filepath);
+        }
+        catch
+        {
+            return false;
+        }
+
+        foreach (var directory in GetWatchDirectories())
+        {
+            var relativePath = Path.GetRelativePath(directory, fullPath);
+            if (relativePath != "." &&
+                !relativePath.Equals("..", StringComparison.Ordinal) &&
+                !relativePath.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) &&
+                !Path.IsPathRooted(relativePath))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static HttpRequestMessage CreateAgentRequest(HttpMethod method, string url)
+    {
+        var request = new HttpRequestMessage(method, url);
+        if (!string.IsNullOrWhiteSpace(AgentToken))
+        {
+            request.Headers.Add("X-Agent-Token", AgentToken);
+        }
+        return request;
+    }
+
+    private static string? FindBackendDotEnv()
+    {
+        var startingDirectories = new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory };
+        foreach (var startingDirectory in startingDirectories)
+        {
+            for (var directory = new DirectoryInfo(startingDirectory); directory is not null; directory = directory.Parent)
+            {
+                var candidate = Path.Combine(directory.FullName, "Brain", "VectorOneBackend", ".env");
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static IReadOnlyDictionary<string, string> LoadDotEnv(string? dotenvPath)
+    {
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (dotenvPath is null)
+        {
+            return values;
+        }
+
+        foreach (var sourceLine in File.ReadLines(dotenvPath))
+        {
+            var line = sourceLine.Trim();
+            if (line.Length == 0 || line.StartsWith('#'))
+            {
+                continue;
+            }
+
+            if (line.StartsWith("export ", StringComparison.Ordinal))
+            {
+                line = line[7..].TrimStart();
+            }
+
+            var separator = line.IndexOf('=');
+            if (separator <= 0)
+            {
+                continue;
+            }
+
+            var key = line[..separator].Trim();
+            var value = line[(separator + 1)..].Trim();
+            if (value.Length >= 2 &&
+                ((value[0] == '"' && value[^1] == '"') || (value[0] == '\'' && value[^1] == '\'')))
+            {
+                value = value[1..^1];
+            }
+
+            if (key.Length > 0)
+            {
+                values[key] = value;
+            }
+        }
+
+        return values;
     }
 }

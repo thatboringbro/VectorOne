@@ -1,16 +1,83 @@
 import json
-import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib import error, request
+from dotenv import dotenv_values
 
 BASE_DIR = Path(__file__).resolve().parents[1]
+DOTENV_SETTINGS = dotenv_values(BASE_DIR / ".env")
 DB_PATH = BASE_DIR / "vectorone_brain.db"
+
+
+def initialize_database() -> None:
+    with sqlite3.connect(DB_PATH) as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS file_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT,
+                username TEXT,
+                filetype TEXT,
+                datecreated TEXT,
+                filehash TEXT UNIQUE
+            )
+            """
+        )
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(file_events)")
+        }
+        if "filepath" not in columns:
+            connection.execute("ALTER TABLE file_events ADD COLUMN filepath TEXT NOT NULL DEFAULT ''")
+        if "device_name" not in columns:
+            connection.execute("ALTER TABLE file_events ADD COLUMN device_name TEXT NOT NULL DEFAULT ''")
+        if "device_id" not in columns:
+            connection.execute("ALTER TABLE file_events ADD COLUMN device_id TEXT NOT NULL DEFAULT ''")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS integrity_checks (
+                filehash TEXT PRIMARY KEY,
+                virustotal_result TEXT NOT NULL,
+                abuse_ch_result TEXT NOT NULL,
+                verdict TEXT NOT NULL,
+                checked_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_commands (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filepath TEXT NOT NULL,
+                action TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        command_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(pending_commands)")
+        }
+        if "requested_by" not in command_columns:
+            connection.execute("ALTER TABLE pending_commands ADD COLUMN requested_by INTEGER")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS endpoint_assets (
+                device_id TEXT PRIMARY KEY,
+                device_name TEXT NOT NULL,
+                username TEXT NOT NULL DEFAULT '',
+                os_version TEXT NOT NULL DEFAULT '',
+                domain_name TEXT NOT NULL DEFAULT '',
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL
+            )
+            """
+        )
 
 
 def _get_api_key(*names: str) -> str | None:
     for name in names:
-        value = os.getenv(name)
+        value = DOTENV_SETTINGS.get(name)
         if value and value.strip():
             return value.strip()
     return None
@@ -95,28 +162,71 @@ def analyze(file_hash: str) -> str:
     if not file_hash:
         return "unknown"
 
-    try:
-        with sqlite3.connect(DB_PATH) as connection:
-            row = connection.execute(
-                "SELECT 1 FROM file_events WHERE filehash = ? LIMIT 1",
-                (file_hash,),
-            ).fetchone()
-    except Exception:
-        row = None
+    initialize_database()
+    with sqlite3.connect(DB_PATH) as connection:
+        cached = connection.execute(
+            "SELECT verdict FROM integrity_checks WHERE filehash = ?",
+            (file_hash,),
+        ).fetchone()
+        if cached is not None and cached[0] == "malicious":
+            return cached[0]
 
-    if row is not None:
-        return "duplicate"
+        row = connection.execute(
+            "SELECT 1 FROM file_events WHERE filehash = ? LIMIT 1",
+            (file_hash,),
+        ).fetchone()
+        if row is not None:
+            return "duplicate"
 
+        if cached is not None:
+            return cached[0]
+
+    return _run_and_store_integrity_checks(file_hash)
+
+
+def ensure_integrity_check(file_hash: str) -> None:
+    """Fetch and cache both CTI providers only when no snapshot exists for a hash."""
+    if not file_hash:
+        return
+    initialize_database()
+    with sqlite3.connect(DB_PATH) as connection:
+        cached = connection.execute(
+            "SELECT 1 FROM integrity_checks WHERE filehash = ?",
+            (file_hash,),
+        ).fetchone()
+    if cached is None:
+        _run_and_store_integrity_checks(file_hash)
+
+
+def _run_and_store_integrity_checks(file_hash: str) -> str:
     vt = check_virustotal(file_hash)
     abuse = check_abuse_ch(file_hash)
 
     if vt.get("malicious", 0) > 0 or abuse.get("malicious") is True:
-        return "malicious"
+        verdict = "malicious"
 
-    if vt.get("suspicious", 0) > 0:
-        return "suspicious"
+    elif vt.get("suspicious", 0) > 0:
+        verdict = "suspicious"
+    else:
+        verdict = "new"
 
-    return "new"
+    with sqlite3.connect(DB_PATH) as connection:
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO integrity_checks
+                (filehash, virustotal_result, abuse_ch_result, verdict, checked_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                file_hash,
+                json.dumps(vt),
+                json.dumps(abuse),
+                verdict,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+
+    return verdict
 
 
 def check_virustotal_status():
