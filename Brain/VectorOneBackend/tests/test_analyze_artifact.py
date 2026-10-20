@@ -4,6 +4,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from fastapi.security import HTTPAuthorizationCredentials
 
@@ -11,7 +12,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from Controllers.analyzeArtifact import analyze, initialize_database
 import main
-from Models.payload import AnalystLogin, EndpointHeartbeat, Payload
+from Models.payload import AgentHeartbeat, AnalystLogin, EndpointHeartbeat, Payload
 from security import authenticate_analyst, create_analyst, create_session, get_session_analyst, initialize_auth_database, revoke_session
 
 
@@ -27,6 +28,44 @@ class AnalyzeArtifactTests(unittest.TestCase):
     def tearDown(self):
         self.db_path_patcher.stop()
         self.temp_dir.cleanup()
+
+    @patch("Controllers.analyzeArtifact._get_api_key", return_value="test-key")
+    @patch(
+        "Controllers.analyzeArtifact._request_json",
+        return_value={
+            "ok": True,
+            "data": {
+                "query_status": "ok",
+                "data": [{"sha256_hash": "a1b2c3", "signature": "test-family"}],
+            },
+        },
+    )
+    def test_abuse_ch_matches_hash_without_case_sensitivity(self, mock_request, mock_api_key):
+        from Controllers.analyzeArtifact import check_abuse_ch
+
+        result = check_abuse_ch("A1B2C3")
+
+        self.assertTrue(result["available"])
+        self.assertTrue(result["malicious"])
+        self.assertEqual(result["query_status"], "ok")
+        self.assertEqual(result["results"][0]["signature"], "test-family")
+        mock_request.assert_called_once()
+
+    @patch("Controllers.analyzeArtifact._get_api_key", return_value="test-key")
+    @patch(
+        "Controllers.analyzeArtifact._request_json",
+        return_value={"ok": True, "data": {"query_status": "rate_limit"}},
+    )
+    def test_abuse_ch_reports_unexpected_provider_status_as_unavailable(self, mock_request, mock_api_key):
+        from Controllers.analyzeArtifact import check_abuse_ch
+
+        result = check_abuse_ch("a1b2c3")
+
+        self.assertFalse(result["available"])
+        self.assertFalse(result["malicious"])
+        self.assertEqual(result["query_status"], "rate_limit")
+        self.assertIn("rate_limit", result["error"])
+        mock_request.assert_called_once()
 
     @patch("Controllers.analyzeArtifact.check_virustotal", return_value={"malicious": 1, "suspicious": 0})
     @patch("Controllers.analyzeArtifact.check_abuse_ch", return_value={"malicious": False})
@@ -131,6 +170,61 @@ class AnalyzeArtifactTests(unittest.TestCase):
         self.assertEqual(event[0], "sample.bin")
         self.assertIsNotNone(cache_table)
 
+    def test_initialize_database_adds_and_backfills_mitre_columns(self):
+        legacy_db = os.path.join(self.temp_dir.name, "legacy.db")
+        with sqlite3.connect(legacy_db) as connection:
+            connection.execute(
+                """
+                CREATE TABLE file_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filename TEXT,
+                    username TEXT,
+                    filetype TEXT,
+                    datecreated TEXT,
+                    filehash TEXT UNIQUE
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE integrity_checks (
+                    filehash TEXT PRIMARY KEY,
+                    virustotal_result TEXT NOT NULL,
+                    abuse_ch_result TEXT NOT NULL,
+                    verdict TEXT NOT NULL,
+                    checked_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.executemany(
+                "INSERT INTO file_events (filename, filehash) VALUES (?, ?)",
+                [("threat.bin", "old-malicious"), ("unknown.bin", "old-new")],
+            )
+            connection.executemany(
+                """
+                INSERT INTO integrity_checks
+                    (filehash, virustotal_result, abuse_ch_result, verdict, checked_at)
+                VALUES (?, '{}', '{}', ?, 'today')
+                """,
+                [("old-malicious", "malicious"), ("old-new", "new")],
+            )
+
+        with patch("Controllers.analyzeArtifact.DB_PATH", legacy_db):
+            initialize_database()
+
+        with sqlite3.connect(legacy_db) as connection:
+            rows = connection.execute(
+                "SELECT filehash, mitre_id, mitre_tactics FROM file_events ORDER BY filehash"
+            ).fetchall()
+            columns = {
+                column[1]: column
+                for column in connection.execute("PRAGMA table_info(file_events)")
+            }
+
+        self.assertEqual(rows, [("old-malicious", "T1204.002", "Execution"), ("old-new", None, None)])
+        self.assertEqual(columns["mitre_id"][4], "'T1204.002'")
+        self.assertEqual(columns["mitre_tactics"][4], "'Execution'")
+
     @patch("main.analyzeArtifact.analyze", return_value="new")
     def test_telemetry_endpoint_persists_payload(self, mock_analyze):
         payload = Payload(
@@ -157,6 +251,29 @@ class AnalyzeArtifactTests(unittest.TestCase):
             event,
             ("sample.bin", "tester", ".bin", "2026-10-05 19:43:59", "endpoint-hash"),
         )
+
+    @patch("main.analyzeArtifact.analyze", return_value="malicious")
+    def test_telemetry_endpoint_adds_mitre_mapping_for_malicious_file(self, mock_analyze):
+        payload = Payload(
+            filename="payload.bin",
+            username="tester",
+            filetype=".bin",
+            datecreated="2026-10-05 19:43:59",
+            filehash="mitre-endpoint-hash",
+        )
+
+        with patch.object(main, "DB_PATH", self.db_path):
+            response = main.receive_telemetry(payload)
+
+        self.assertEqual(response["verdict"], "malicious")
+        with sqlite3.connect(self.db_path) as connection:
+            mapping = connection.execute(
+                "SELECT mitre_id, mitre_tactics FROM file_events WHERE filehash = ?",
+                ("mitre-endpoint-hash",),
+            ).fetchone()
+
+        self.assertEqual(mapping, ("T1204.002", "Execution"))
+        mock_analyze.assert_called_once_with("mitre-endpoint-hash")
 
     @patch("main.analyzeArtifact.analyze", return_value="malicious")
     def test_telemetry_endpoint_does_not_automatically_delete_malicious_verdict(self, mock_analyze):
@@ -294,6 +411,65 @@ class AnalyzeArtifactTests(unittest.TestCase):
         self.assertEqual(endpoints[0]["os_version"], "Linux test-kernel")
         self.assertEqual(endpoints[0]["event_count"], 2)
         self.assertEqual(endpoints[0]["malicious_count"], 1)
+
+    def test_agent_heartbeat_registers_and_updates_agent(self):
+        heartbeat = AgentHeartbeat(
+            agent_id="agent-123",
+            hostname="LAB-VM-01",
+            ip_address="192.0.2.10",
+            os_version="Linux test-kernel",
+        )
+
+        with patch.object(main, "DB_PATH", self.db_path):
+            result = main.agent_heartbeat(heartbeat)
+            agents = main.list_agents()
+
+        self.assertEqual(result["status"], "online")
+        self.assertEqual(len(agents), 1)
+        self.assertEqual(agents[0]["agent_id"], "agent-123")
+        self.assertEqual(agents[0]["hostname"], "LAB-VM-01")
+        self.assertEqual(agents[0]["ip_address"], "192.0.2.10")
+        self.assertEqual(agents[0]["os_version"], "Linux test-kernel")
+        self.assertEqual(agents[0]["status"], "online")
+        self.assertEqual(agents[0]["last_seen"], result["last_seen"])
+
+        updated_heartbeat = heartbeat.model_copy(update={"ip_address": "192.0.2.11"})
+        with patch.object(main, "DB_PATH", self.db_path):
+            main.agent_heartbeat(updated_heartbeat)
+            agents = main.list_agents()
+
+        self.assertEqual(len(agents), 1)
+        self.assertEqual(agents[0]["ip_address"], "192.0.2.11")
+        self.assertEqual(agents[0]["status"], "online")
+
+    def test_list_agents_marks_stale_heartbeat_offline(self):
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO agents
+                    (agent_id, hostname, ip_address, os_version, status, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "stale-agent",
+                    "LAB-VM-02",
+                    "192.0.2.20",
+                    "Linux test-kernel",
+                    "online",
+                    (datetime.now(timezone.utc) - timedelta(minutes=4)).isoformat(),
+                ),
+            )
+
+        with patch.object(main, "DB_PATH", self.db_path):
+            agents = main.list_agents()
+
+        self.assertEqual(agents[0]["status"], "offline")
+        with sqlite3.connect(self.db_path) as connection:
+            status = connection.execute(
+                "SELECT status FROM agents WHERE agent_id = ?",
+                ("stale-agent",),
+            ).fetchone()[0]
+        self.assertEqual(status, "offline")
 
     @patch("main.analyzeArtifact.analyze", return_value="duplicate")
     def test_duplicate_telemetry_backfills_missing_filepath(self, mock_analyze):

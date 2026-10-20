@@ -8,6 +8,10 @@ from dotenv import dotenv_values
 BASE_DIR = Path(__file__).resolve().parents[1]
 DOTENV_SETTINGS = dotenv_values(BASE_DIR / ".env")
 DB_PATH = BASE_DIR / "vectorone_brain.db"
+MITRE_MAPPING = {
+    "malicious": ("T1204.002", "Execution"),
+    "suspicious": ("T1204.002", "Execution"),
+}
 
 
 def initialize_database() -> None:
@@ -20,7 +24,9 @@ def initialize_database() -> None:
                 username TEXT,
                 filetype TEXT,
                 datecreated TEXT,
-                filehash TEXT UNIQUE
+                filehash TEXT UNIQUE,
+                mitre_id TEXT DEFAULT 'T1204.002',
+                mitre_tactics TEXT DEFAULT 'Execution'
             )
             """
         )
@@ -33,6 +39,11 @@ def initialize_database() -> None:
             connection.execute("ALTER TABLE file_events ADD COLUMN device_name TEXT NOT NULL DEFAULT ''")
         if "device_id" not in columns:
             connection.execute("ALTER TABLE file_events ADD COLUMN device_id TEXT NOT NULL DEFAULT ''")
+        mitre_columns_missing = "mitre_id" not in columns or "mitre_tactics" not in columns
+        if "mitre_id" not in columns:
+            connection.execute("ALTER TABLE file_events ADD COLUMN mitre_id TEXT DEFAULT 'T1204.002'")
+        if "mitre_tactics" not in columns:
+            connection.execute("ALTER TABLE file_events ADD COLUMN mitre_tactics TEXT DEFAULT 'Execution'")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS integrity_checks (
@@ -73,6 +84,48 @@ def initialize_database() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agents (
+                agent_id TEXT PRIMARY KEY,
+                hostname TEXT NOT NULL,
+                ip_address TEXT NOT NULL,
+                os_version TEXT NOT NULL,
+                status TEXT NOT NULL,
+                last_seen TEXT NOT NULL
+            )
+            """
+        )
+        mitre_backfill_filter = (
+            ""
+            if mitre_columns_missing
+            else "WHERE event.mitre_id IS NULL OR event.mitre_tactics IS NULL"
+        )
+        default_mitre_id, default_mitre_tactic = MITRE_MAPPING["malicious"]
+        connection.execute(
+            f"""
+            UPDATE file_events AS event
+            SET mitre_id = (
+                    SELECT CASE WHEN checks.verdict IN ('malicious', 'suspicious')
+                                THEN ? ELSE NULL END
+                    FROM integrity_checks AS checks
+                    WHERE checks.filehash = event.filehash
+                ),
+                mitre_tactics = (
+                    SELECT CASE WHEN checks.verdict IN ('malicious', 'suspicious')
+                                THEN ? ELSE NULL END
+                    FROM integrity_checks AS checks
+                    WHERE checks.filehash = event.filehash
+                )
+            {mitre_backfill_filter}
+            """,
+            (default_mitre_id, default_mitre_tactic),
+        )
+
+
+def mitre_metadata_for_verdict(verdict: str) -> tuple[str | None, str | None]:
+    """Map threat verdicts to ATT&CK metadata supported by file telemetry."""
+    return MITRE_MAPPING.get(verdict.casefold(), (None, None))
 
 
 def _get_api_key(*names: str) -> str | None:
@@ -148,13 +201,38 @@ def check_abuse_ch(file_hash: str) -> dict:
 
     payload = response["data"]
     query_status = payload.get("query_status")
-    if query_status in {"hash_not_found", "ok", "no_result"}:
-        data = payload.get("data") or payload.get("results") or []
-        matches = data if isinstance(data, list) else [data] if data else []
-        malicious = bool(matches and any(item.get("sha256_hash") == file_hash for item in matches if isinstance(item, dict)))
-        return {"available": True, "malicious": malicious, "results": matches}
+    if query_status in {"hash_not_found", "no_result"}:
+        return {
+            "available": True,
+            "malicious": False,
+            "query_status": query_status,
+            "results": [],
+        }
+    if query_status != "ok":
+        return {
+            "available": False,
+            "malicious": False,
+            "query_status": query_status,
+            "error": f"Unexpected MalwareBazaar query status: {query_status or 'missing'}",
+        }
 
-    return {"available": True, "malicious": False, "results": []}
+    data = payload.get("data") or payload.get("results") or []
+    matches = data if isinstance(data, list) else [data] if data else []
+    normalized_hash = file_hash.casefold()
+    malicious = bool(
+        matches
+        and any(
+            str(item.get("sha256_hash", "")).casefold() == normalized_hash
+            for item in matches
+            if isinstance(item, dict)
+        )
+    )
+    return {
+        "available": True,
+        "malicious": malicious,
+        "query_status": query_status,
+        "results": matches,
+    }
 
 
 def analyze(file_hash: str) -> str:

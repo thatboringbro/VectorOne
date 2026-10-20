@@ -27,6 +27,7 @@ import './App.css'
 import './auth.css'
 import './response.css'
 import './event-details.css'
+import './fleet.css'
 
 type EventRecord = {
   id: number
@@ -37,6 +38,8 @@ type EventRecord = {
   filehash: string
   filepath: string
   device_name: string
+  mitre_id: string | null
+  mitre_tactics: string | null
   verdict: string
   response_status: string | null
   virustotal_result: string | null
@@ -58,18 +61,13 @@ type ResponseRecord = {
   verdict: string
 }
 
-type EndpointRecord = {
-  device_id: string
-  device_name: string
-  username: string | null
+type AgentRecord = {
+  agent_id: string
+  hostname: string
+  ip_address: string
   os_version: string
-  domain_name: string
-  first_seen: string
-  last_seen: string | null
-  event_count: number
-  malicious_count: number
-  suspicious_count: number
-  observed_files: number
+  status: 'online' | 'offline'
+  last_seen: string
 }
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
@@ -211,7 +209,7 @@ function Dashboard({ token, analyst, onSignOut }: { token: string; analyst: Anal
 
   const filteredEvents = events.filter((event) => {
     const matchesVerdict = verdictFilter === 'all' || event.verdict.toLowerCase() === verdictFilter
-    const searchable = `${event.filename} ${event.filepath} ${event.filehash} ${event.username}`.toLowerCase()
+    const searchable = `${event.filename} ${event.filepath} ${event.filehash} ${event.username} ${event.mitre_id || ''}`.toLowerCase()
     return matchesVerdict && searchable.includes(query.toLowerCase())
   })
   const maliciousCount = events.filter((event) => event.verdict.toLowerCase() === 'malicious').length
@@ -250,7 +248,7 @@ function Dashboard({ token, analyst, onSignOut }: { token: string; analyst: Anal
             <div>
               <div className="eyebrow"><span className="eyebrow-line" /> {activeView === 'events' ? 'ENDPOINT TELEMETRY' : activeView === 'endpoints' ? 'MANAGED ASSETS' : 'ANALYST RESPONSE AUDIT'}</div>
               <h1>{activeView === 'events' ? 'Detection events' : activeView === 'endpoints' ? 'Endpoints' : 'Response history'}</h1>
-              <p className="subtitle">{activeView === 'events' ? 'File activity observed by VectorOne endpoint agents' : activeView === 'endpoints' ? 'Devices reporting file telemetry to VectorOne' : 'Threats and analyst-issued endpoint response actions'}</p>
+              <p className="subtitle">{activeView === 'events' ? 'File activity observed by VectorOne endpoint agents' : activeView === 'endpoints' ? 'Live connection health for registered VectorOne agents' : 'Threats and analyst-issued endpoint response actions'}</p>
             </div>
             <div className="heading-status">
               <span className="status-icon"><LockKeyhole size={15} /></span>
@@ -298,20 +296,21 @@ function Dashboard({ token, analyst, onSignOut }: { token: string; analyst: Anal
 
             <div className="table-scroll">
               <table className="events-table">
-                <thead><tr><th className="col-id">ID</th><th className="col-verdict">SEVERITY</th><th className="col-file">FILE / PATH</th><th className="col-hash">SHA-256</th><th className="col-user">USER</th><th className="col-time">OBSERVED</th><th className="col-action"><span className="sr-only">Actions</span></th></tr></thead>
+                <thead><tr><th className="col-id">ID</th><th className="col-verdict">SEVERITY</th><th className="col-file">FILE / PATH</th><th className="col-mitre">MITRE ATT&amp;CK</th><th className="col-hash">SHA-256</th><th className="col-user">USER</th><th className="col-time">OBSERVED</th><th className="col-action"><span className="sr-only">Actions</span></th></tr></thead>
                 <tbody>
-                  {loading ? <tr><td colSpan={7} className="table-message"><LoaderCircle className="spin" size={17} /> Syncing event records</td></tr> : filteredEvents.length === 0 ? <tr><td colSpan={7} className="table-message"><ListFilter size={17} /> {error ? 'Waiting for Brain connection' : 'No matching event records'}</td></tr> : filteredEvents.map((event) => (
+                  {loading ? <tr><td colSpan={8} className="table-message"><LoaderCircle className="spin" size={17} /> Syncing event records</td></tr> : filteredEvents.length === 0 ? <tr><td colSpan={8} className="table-message"><ListFilter size={17} /> {error ? 'Waiting for Brain connection' : 'No matching event records'}</td></tr> : filteredEvents.map((event) => (
                     <Fragment key={event.id}>
                       <tr className={`event-row ${expandedEventId === event.id ? 'event-row-expanded' : ''}`} onClick={() => setExpandedEventId(expandedEventId === event.id ? null : event.id)}>
                         <td className="event-id">EV-{event.id.toString().padStart(5, '0')}</td>
                         <td><VerdictBadge verdict={event.verdict} /></td>
                         <td className="file-cell"><button className="event-expand-button" aria-expanded={expandedEventId === event.id} onClick={(clickEvent) => { clickEvent.stopPropagation(); setExpandedEventId(expandedEventId === event.id ? null : event.id) }}><ChevronRight size={13} /><span className="event-file-label"><span className="file-name">{event.filename}</span><span className="file-path" title={event.filepath || 'No filepath stored'}>{event.filepath || 'PATH NOT AVAILABLE'}</span></span></button></td>
+                        <td><MitreBadge mitreId={event.mitre_id} tactics={event.mitre_tactics} /></td>
                         <td className="hash-cell" title={event.filehash}>{event.filehash}</td>
                         <td className="user-cell">{event.username}</td>
                         <td className="time-cell">{event.datecreated}</td>
                         <td className="action-cell">{event.response_status ? <ResponseStatus status={event.response_status} /> : <button className="quarantine-button" disabled={!event.filepath || queueingId === event.id} onClick={(clickEvent) => { clickEvent.stopPropagation(); setQuarantineTarget(event) }} title={!event.filepath ? 'No filepath is available for this event' : 'Open quarantine confirmation'}>{queueingId === event.id ? <LoaderCircle size={13} className="spin" /> : <ShieldAlert size={13} />}<span>QUARANTINE</span></button>}</td>
                       </tr>
-                      {expandedEventId === event.id && <tr className="details-row" key={`${event.id}-details`}><td colSpan={7}><EventDetails event={event} /></td></tr>}
+                      {expandedEventId === event.id && <tr className="details-row" key={`${event.id}-details`}><td colSpan={8}><EventDetails event={event} /></td></tr>}
                     </Fragment>
                   ))}
                 </tbody>
@@ -328,81 +327,75 @@ function Dashboard({ token, analyst, onSignOut }: { token: string; analyst: Anal
 }
 
 function EndpointsPanel({ token }: { token: string }) {
-  const [endpoints, setEndpoints] = useState<EndpointRecord[]>([])
+  const [agents, setAgents] = useState<AgentRecord[]>([])
   const [query, setQuery] = useState('')
-  const [riskFilter, setRiskFilter] = useState('all')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
-  const loadEndpoints = useCallback(async () => {
+  const loadAgents = useCallback(async () => {
     try {
-      const response = await fetch(`${API_BASE}/api/endpoints`, {
+      const response = await fetch(`${API_BASE}/api/agents`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       if (!response.ok) throw new Error(`Brain returned HTTP ${response.status}`)
-      setEndpoints((await response.json()) as EndpointRecord[])
+      setAgents((await response.json()) as AgentRecord[])
       setError('')
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : 'Unable to load endpoints')
+      setError(loadError instanceof Error ? loadError.message : 'Unable to load agent fleet')
     } finally {
       setLoading(false)
     }
   }, [token])
 
   useEffect(() => {
-    const initialLoad = window.setTimeout(() => void loadEndpoints(), 0)
-    const poll = window.setInterval(() => void loadEndpoints(), 10_000)
+    const initialLoad = window.setTimeout(() => void loadAgents(), 0)
+    const poll = window.setInterval(() => void loadAgents(), 10_000)
     return () => {
       window.clearTimeout(initialLoad)
       window.clearInterval(poll)
     }
-  }, [loadEndpoints])
+  }, [loadAgents])
 
-  const filteredEndpoints = endpoints.filter((endpoint) => {
-    const hasThreat = endpoint.malicious_count > 0 || endpoint.suspicious_count > 0
-    const matchesRisk = riskFilter === 'all' || (riskFilter === 'threats' ? hasThreat : !hasThreat)
-    return matchesRisk && `${endpoint.device_name} ${endpoint.username || ''}`.toLowerCase().includes(query.toLowerCase())
-  })
-  const reportingCount = endpoints.filter((endpoint) => endpoint.device_name !== 'Unreported device').length
-  const threatEndpointCount = endpoints.filter((endpoint) => endpoint.malicious_count > 0 || endpoint.suspicious_count > 0).length
+  const filteredAgents = agents.filter((agent) =>
+    `${agent.hostname} ${agent.ip_address} ${agent.os_version} ${agent.agent_id}`
+      .toLowerCase()
+      .includes(query.toLowerCase()),
+  )
+  const activeCount = agents.filter((agent) => agent.status === 'online').length
+  const offlineCount = agents.length - activeCount
 
   return <>
-    <section className="metric-strip endpoint-metrics" aria-label="Endpoint summary">
-      <div className="metric-cell"><div className="metric-label"><span>KNOWN ENDPOINTS</span><HardDrive size={14} /></div><div className="metric-value">{endpoints.length.toString().padStart(2, '0')}<span className="metric-unit">ASSETS</span></div></div>
-      <div className="metric-cell completed-metric"><div className="metric-label"><span>REPORTING DEVICE IDs</span><Check size={14} /></div><div className="metric-value">{reportingCount.toString().padStart(2, '0')}<span className="metric-unit">IDENTIFIED</span></div></div>
-      <div className="metric-cell alert-metric"><div className="metric-label"><span>ENDPOINTS WITH THREATS</span><ShieldAlert size={14} /></div><div className="metric-value">{threatEndpointCount.toString().padStart(2, '0')}<span className="metric-unit">REVIEW</span></div></div>
-      <div className="metric-cell"><div className="metric-label"><span>FILE OBSERVATIONS</span><Activity size={14} /></div><div className="metric-value">{endpoints.reduce((total, endpoint) => total + endpoint.event_count, 0).toString().padStart(2, '0')}<span className="metric-unit">EVENTS</span></div></div>
+    <section className="metric-strip fleet-metrics" aria-label="Endpoint fleet summary">
+      <div className="metric-cell"><div className="metric-label"><span>TOTAL ENDPOINTS</span><HardDrive size={14} /></div><div className="metric-value">{agents.length.toString().padStart(2, '0')}<span className="metric-unit">REGISTERED</span></div></div>
+      <div className="metric-cell fleet-online-metric"><div className="metric-label"><span>ACTIVE AGENTS</span><Check size={14} /></div><div className="metric-value">{activeCount.toString().padStart(2, '0')}<span className="metric-unit">ONLINE</span></div></div>
+      <div className="metric-cell alert-metric"><div className="metric-label"><span>OFFLINE FLEET COUNT</span><AlertTriangle size={14} /></div><div className="metric-value">{offlineCount.toString().padStart(2, '0')}<span className="metric-unit">OFFLINE</span></div></div>
     </section>
-    {error && <div className="error-bar" role="alert"><AlertTriangle size={15} /><span>Endpoint inventory unavailable: {error}</span></div>}
+    {error && <div className="error-bar" role="alert"><AlertTriangle size={15} /><span>Agent fleet unavailable: {error}</span></div>}
     <section className="events-panel">
       <div className="panel-header">
-        <div className="panel-title"><span className="panel-index">03</span><h2>Endpoint inventory</h2><span className="result-count">{filteredEndpoints.length} ASSETS</span></div>
+        <div className="panel-title"><span className="panel-index">03</span><h2>Agent fleet</h2><span className="result-count">{filteredAgents.length} NODES</span></div>
         <div className="panel-tools">
-          <label className="search-control"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search device or user..." aria-label="Search endpoints" /><kbd>/</kbd></label>
-          <label className="filter-control"><Filter size={14} /><select value={riskFilter} onChange={(event) => setRiskFilter(event.target.value)} aria-label="Filter endpoint risk"><option value="all">All endpoints</option><option value="threats">With threats</option><option value="clear">No detections</option></select><ChevronDown size={13} /></label>
-          <button className="icon-button" onClick={() => void loadEndpoints()} title="Refresh endpoints" aria-label="Refresh endpoints"><RefreshCw size={15} /></button>
+          <label className="search-control"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search host, IP, OS..." aria-label="Search agents" /><kbd>/</kbd></label>
+          <button className="icon-button" onClick={() => void loadAgents()} title="Refresh agent fleet" aria-label="Refresh agent fleet"><RefreshCw size={15} /></button>
         </div>
       </div>
       <div className="table-scroll">
-        <table className="endpoint-table">
-          <thead><tr><th>DEVICE</th><th>USER / DOMAIN</th><th>OPERATING SYSTEM</th><th>EVENTS</th><th>MALICIOUS</th><th>SUSPICIOUS</th><th>FILES</th><th>LAST SEEN</th></tr></thead>
+        <table className="fleet-table">
+          <thead><tr><th>HOSTNAME</th><th>IP ADDRESS</th><th>OPERATING SYSTEM</th><th>STATUS</th><th>LAST SEEN (UTC)</th></tr></thead>
           <tbody>
-                {loading ? <tr><td colSpan={8} className="table-message"><LoaderCircle className="spin" size={17} /> Loading endpoint inventory</td></tr> : filteredEndpoints.length === 0 ? <tr><td colSpan={8} className="table-message"><ListFilter size={17} /> {error ? 'Waiting for Brain connection' : 'No endpoints match these filters'}</td></tr> : filteredEndpoints.map((endpoint) => (
-                  <tr key={endpoint.device_id}>
-                <td className="endpoint-device"><HardDrive size={14} /><span>{endpoint.device_name}</span>{endpoint.device_name === 'Unreported device' && <small>LEGACY TELEMETRY</small>}</td>
-                    <td className="endpoint-identity"><span>{endpoint.username || 'Unknown user'}</span><small>{endpoint.domain_name || 'DOMAIN NOT REPORTED'}</small></td>
-                    <td className="endpoint-os" title={endpoint.os_version}>{endpoint.os_version || 'Not reported'}</td>
-                <td className="event-id">{endpoint.event_count}</td>
-                <td><span className={endpoint.malicious_count ? 'endpoint-count endpoint-count-bad' : 'endpoint-count'}>{endpoint.malicious_count}</span></td>
-                <td><span className={endpoint.suspicious_count ? 'endpoint-count endpoint-count-warn' : 'endpoint-count'}>{endpoint.suspicious_count}</span></td>
-                <td className="event-id">{endpoint.observed_files}</td>
-                <td className="time-cell">{endpoint.last_seen || 'Unknown'}</td>
+            {loading ? <tr><td colSpan={5} className="table-message"><LoaderCircle className="spin" size={17} /> Loading agent fleet</td></tr> : filteredAgents.length === 0 ? <tr><td colSpan={5} className="table-message"><ListFilter size={17} /> {error ? 'Waiting for Brain connection' : 'No registered agents match this search'}</td></tr> : filteredAgents.map((agent) => (
+              <tr key={agent.agent_id}>
+                <td className="fleet-hostname" title={agent.agent_id}>{agent.hostname}</td>
+                <td className="fleet-mono">{agent.ip_address || 'Not reported'}</td>
+                <td className="fleet-os" title={agent.os_version}>{agent.os_version || 'Not reported'}</td>
+                <td><span className={`agent-status agent-status-${agent.status}`}>{agent.status}</span></td>
+                <td className="fleet-mono">{new Date(agent.last_seen).toISOString()}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      <footer className="table-footer"><div><span className="footer-live-dot" /> AUTO-REFRESH <span className="footer-separator">/</span> 10 SEC</div><div>SHOWING {filteredEndpoints.length} OF {endpoints.length} ENDPOINTS</div></footer>
+      <footer className="table-footer"><div><span className="footer-live-dot" /> AUTO-REFRESH <span className="footer-separator">/</span> 10 SEC</div><div>SHOWING {filteredAgents.length} OF {agents.length} ENDPOINTS <span className="footer-separator">/</span> OFFLINE AFTER 180 SEC</div></footer>
     </section>
   </>
 }
@@ -503,6 +496,7 @@ function EventDetails({ event }: { event: EventRecord }) {
         <DetailField label="USER" value={event.username || 'Not reported'} />
         <DetailField label="FILE TYPE" value={event.filetype || 'Unknown'} />
         <DetailField label="OBSERVED AT" value={event.datecreated || 'Unknown'} />
+        <div className="detail-field detail-field-wide"><dt>MITRE ATT&amp;CK</dt><dd><MitreBadge mitreId={event.mitre_id} tactics={event.mitre_tactics} />{event.mitre_tactics && <span className="mitre-tactic">TACTIC: {event.mitre_tactics}</span>}</dd></div>
         <DetailField label="FILE PATH" value={event.filepath || 'Not available'} mono wide />
         <DetailField label="SHA-256" value={event.filehash || 'Not available'} mono wide />
       </dl>
@@ -515,6 +509,15 @@ function EventDetails({ event }: { event: EventRecord }) {
       </div>
     </section>
   </div>
+}
+
+function MitreBadge({ mitreId, tactics }: { mitreId: string | null; tactics: string | null }) {
+  if (!mitreId) return <span className="mitre-unmapped">NOT MAPPED</span>
+
+  const techniqueName = mitreId === 'T1204.002' ? 'User Execution' : tactics || 'ATT&CK'
+  return <span className="mitre-badge" title={`MITRE ATT&CK tactic: ${tactics || 'Not reported'}`}>
+    {mitreId} - {techniqueName}
+  </span>
 }
 
 function DetailField({ label, value, mono = false, wide = false }: { label: string; value: string; mono?: boolean; wide?: boolean }) {

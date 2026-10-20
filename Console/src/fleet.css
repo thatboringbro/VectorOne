@@ -1,0 +1,101 @@
+.fleet-metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.fleet-online-metric .metric-value,
+.fleet-online-metric .metric-label svg {
+  color: #55c69a;
+}
+
+.fleet-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.fleet-table th {
+  height: 31px;
+  padding: 0 12px;
+  border-bottom: 1px solid #30383d;
+  background: #171c1f;
+  color: #79868c;
+  font: 600 9px var(--mono);
+  letter-spacing: .65px;
+  white-space: nowrap;
+}
+
+.fleet-table td {
+  height: 43px;
+  padding: 6px 12px;
+  border-bottom: 1px solid #272f33;
+  color: #aeb8bc;
+  font-size: 11px;
+  vertical-align: middle;
+}
+
+.fleet-table tbody tr:hover {
+  background: #171d20;
+}
+
+.fleet-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.fleet-hostname,
+.fleet-mono {
+  font-family: var(--mono);
+  font-size: 10px !important;
+  white-space: nowrap;
+}
+
+.fleet-hostname {
+  color: #e0e6e8 !important;
+  font-weight: 600;
+}
+
+.fleet-os {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-status {
+  display: inline-flex;
+  min-width: 62px;
+  height: 19px;
+  justify-content: center;
+  align-items: center;
+  border: 1px solid;
+  font: 600 9px var(--mono);
+  letter-spacing: .4px;
+  text-transform: uppercase;
+}
+
+.agent-status-online {
+  border-color: #355f4e;
+  background: #17251f;
+  color: #73d4a8;
+}
+
+.agent-status-offline {
+  border-color: #71393d;
+  background: #29191b;
+  color: #ff777c;
+}
+
+@media (max-width: 540px) {
+  .fleet-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .fleet-metrics .metric-cell {
+    border-right: 0;
+    border-bottom: 1px solid #30383d;
+  }
+
+  .fleet-metrics .metric-cell:last-child {
+    border-bottom: 0;
+  }
+}

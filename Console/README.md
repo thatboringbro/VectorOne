@@ -35,7 +35,11 @@ The Brain and Agent both read the same ignored file at `Brain/VectorOneBackend/.
 VECTORONE_AGENT_TOKEN=replace-with-generated-secret
 ```
 
-The Agent reads the token directly from that file and sends it as `X-Agent-Token` for telemetry, command polling, and command completion. No shell export is needed. Restart Uvicorn and the Agent after changing `.env` so each reloads the file.
+The Agent reads the token directly from that file and sends it as `X-Agent-Token` for telemetry, heartbeats, command polling, and command completion. No shell export is needed. Restart Uvicorn and the Agent after changing `.env` so each reloads the file. Each Agent creates a persistent ID under the user's local application data directory (or falls back to the machine name if that location is not writable) and reports its hostname, best-effort local IP address, and OS version every 60 seconds. The Console marks agents offline after 3 minutes without a heartbeat.
+
+The Agent connects to `http://127.0.0.1:8000` by default, matching the Brain and console. To use a different Brain address, add `VECTORONE_API_URL` to the same `.env` file with the full telemetry endpoint, for example `VECTORONE_API_URL=http://127.0.0.1:9000/api/telemetry`, then restart the Agent.
+
+The Agent watches the current user's Downloads folder, platform temporary folders, and available startup/persistence folders (`/etc/init.d` on Linux and Startup folders on Windows). Hidden dotfiles, partial downloads, temporary/lock files, and common IDE/build cache directories are skipped before telemetry is sent. The Console tags malicious or suspicious file observations as MITRE ATT&CK `T1204.002` (User Execution / Execution); other verdicts remain unmapped unless telemetry supports an ATT&CK technique.
 
 ## Response flow
 

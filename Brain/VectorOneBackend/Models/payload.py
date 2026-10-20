@@ -19,6 +19,13 @@ class EndpointHeartbeat(BaseModel):
     domain_name: str = ""
 
 
+class AgentHeartbeat(BaseModel):
+    agent_id: str
+    hostname: str
+    ip_address: str
+    os_version: str
+
+
 class CommandRequest(BaseModel):
     filepath: str
     action: str
@@ -26,5 +33,4 @@ class CommandRequest(BaseModel):
 class AnalystLogin(BaseModel):
     email: str
     password: str
-
 

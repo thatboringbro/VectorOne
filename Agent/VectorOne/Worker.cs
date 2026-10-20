@@ -1,4 +1,6 @@
 using System.IO;
+using System.Net;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -10,7 +12,7 @@ public class Worker : BackgroundService
 {
     private readonly ILogger<Worker> _logger;
     private static readonly HttpClient _httpClient = new HttpClient();
-    private const string DefaultApiUrl = "http://127.0.0.1:8080/api/telemetry";
+    private const string DefaultApiUrl = "http://127.0.0.1:8000/api/telemetry";
     private static readonly string? DotEnvPath = FindBackendDotEnv();
     private static readonly IReadOnlyDictionary<string, string> DotEnvSettings = LoadDotEnv(DotEnvPath);
     private static readonly string TargetApiUrl = DotEnvSettings.TryGetValue("VECTORONE_API_URL", out var apiUrl)
@@ -19,10 +21,26 @@ public class Worker : BackgroundService
     private static readonly string BrainBaseUrl = new Uri(TargetApiUrl).GetLeftPart(UriPartial.Authority);
     private static readonly string AgentToken = DotEnvSettings.GetValueOrDefault("VECTORONE_AGENT_TOKEN", string.Empty);
     private static readonly string PendingCommandsUrl = $"{BrainBaseUrl}/api/commands/pending";
-    private static readonly string EndpointHeartbeatUrl = $"{BrainBaseUrl}/api/endpoints/heartbeat";
+    private static readonly string AgentHeartbeatUrl = $"{BrainBaseUrl}/api/agents/heartbeat";
     private static readonly string DeviceName = Environment.MachineName;
-    private static readonly string DeviceDomain = OperatingSystem.IsWindows() ? Environment.UserDomainName : string.Empty;
-    private static readonly string DeviceId = $"{DeviceName}@{Environment.UserDomainName}";
+    private static readonly string AgentId = LoadOrCreateAgentId();
+    private static readonly string DeviceId = AgentId;
+    private static readonly HashSet<string> ExcludedDirectoryNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".git",
+        ".idea",
+        ".cache",
+        ".gradle",
+        ".nuget",
+        ".vscode",
+        ".vs",
+        "__pycache__",
+        "bin",
+        "node_modules",
+        "obj",
+        "packages",
+        "target"
+    };
     private readonly List<FileSystemWatcher> _watchers = new();
 
     public Worker(ILogger<Worker> logger)
@@ -62,7 +80,7 @@ public class Worker : BackgroundService
                 var watcher = new FileSystemWatcher(watchPath)
                 {
                     NotifyFilter = NotifyFilters.FileName | NotifyFilters.CreationTime | NotifyFilters.LastWrite,
-                    Filter = "*.*",
+                    Filter = "*",
                     IncludeSubdirectories = false
                 };
 
@@ -70,6 +88,12 @@ public class Worker : BackgroundService
                 {
                     if (string.IsNullOrWhiteSpace(e.FullPath))
                     {
+                        return;
+                    }
+
+                    if (IsExcludedFile(e.FullPath))
+                    {
+                        _logger.LogDebug("Skipping excluded file from telemetry: {path}", e.FullPath);
                         return;
                     }
 
@@ -116,19 +140,64 @@ public class Worker : BackgroundService
         }
 
         var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        TryAdd(userProfile);
-        TryAdd(Path.Combine(userProfile, "Downloads"));
-        TryAdd(Path.Combine(userProfile, "Desktop"));
-        TryAdd(Path.Combine(userProfile, "Documents"));
-
-        if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+        if (!string.IsNullOrWhiteSpace(userProfile))
         {
-            TryAdd(Path.Combine("/tmp"));
+            TryAdd(Path.Combine(userProfile, "Downloads"));
         }
+        TryAdd(Path.GetTempPath());
+
+        var localApplicationData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (!string.IsNullOrWhiteSpace(localApplicationData))
+        {
+            TryAdd(Path.Combine(localApplicationData, "Temp"));
+        }
+
+        var windowsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        if (!string.IsNullOrWhiteSpace(windowsDirectory))
+        {
+            TryAdd(Path.Combine(windowsDirectory, "Temp"));
+        }
+
+        var commonApplicationData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        if (!string.IsNullOrWhiteSpace(commonApplicationData))
+        {
+            TryAdd(Path.Combine(commonApplicationData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup"));
+        }
+
+        var startMenu = Environment.GetFolderPath(Environment.SpecialFolder.StartMenu);
+        if (!string.IsNullOrWhiteSpace(startMenu))
+        {
+            TryAdd(Path.Combine(startMenu, "Programs", "Startup"));
+        }
+
+        TryAdd(Path.Combine(Path.DirectorySeparatorChar.ToString(), "etc", "init.d"));
 
         return discovered
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+    public static bool IsExcludedFile(string filePath)
+    {
+        var fileName = Path.GetFileName(filePath);
+        if (fileName.StartsWith(".", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var extension = Path.GetExtension(fileName);
+        if (extension.Equals(".tmp", StringComparison.OrdinalIgnoreCase) ||
+            extension.Equals(".crdownload", StringComparison.OrdinalIgnoreCase) ||
+            extension.Equals(".part", StringComparison.OrdinalIgnoreCase) ||
+            extension.Equals(".lock", StringComparison.OrdinalIgnoreCase) ||
+            fileName.EndsWith('~'))
+        {
+            return true;
+        }
+
+        return filePath
+            .Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            .Any(ExcludedDirectoryNames.Contains);
     }
 
     private async Task GetDetailsAsync(string filePath)
@@ -227,13 +296,12 @@ public class Worker : BackgroundService
                 {
                     var heartbeat = new
                     {
-                        device_id = DeviceId,
-                        device_name = DeviceName,
-                        username = Environment.UserName,
-                        os_version = RuntimeInformation.OSDescription,
-                        domain_name = DeviceDomain
+                        agent_id = AgentId,
+                        hostname = DeviceName,
+                        ip_address = GetLocalIpAddress(),
+                        os_version = RuntimeInformation.OSDescription
                     };
-                    using var request = CreateAgentRequest(HttpMethod.Post, EndpointHeartbeatUrl);
+                    using var request = CreateAgentRequest(HttpMethod.Post, AgentHeartbeatUrl);
                     request.Content = new StringContent(
                         JsonSerializer.Serialize(heartbeat),
                         System.Text.Encoding.UTF8,
@@ -383,6 +451,54 @@ public class Worker : BackgroundService
             request.Headers.Add("X-Agent-Token", AgentToken);
         }
         return request;
+    }
+
+    private static string LoadOrCreateAgentId()
+    {
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var idDirectory = string.IsNullOrWhiteSpace(localAppData)
+            ? AppContext.BaseDirectory
+            : Path.Combine(localAppData, "VectorOne");
+        var idPath = Path.Combine(idDirectory, ".vectorone_id");
+
+        try
+        {
+            Directory.CreateDirectory(idDirectory);
+            if (File.Exists(idPath))
+            {
+                var existingId = File.ReadAllText(idPath).Trim();
+                if (Guid.TryParse(existingId, out var parsedId))
+                {
+                    return parsedId.ToString();
+                }
+            }
+
+            var agentId = Guid.NewGuid().ToString();
+            File.WriteAllText(idPath, agentId);
+            return agentId;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return DeviceName;
+        }
+    }
+
+    private static string GetLocalIpAddress()
+    {
+        try
+        {
+            var addresses = Dns.GetHostAddresses(Dns.GetHostName())
+                .Where(address => !IPAddress.IsLoopback(address))
+                .ToArray();
+            return addresses.FirstOrDefault(address => address.AddressFamily == AddressFamily.InterNetwork)
+                ?.ToString()
+                ?? addresses.FirstOrDefault()?.ToString()
+                ?? string.Empty;
+        }
+        catch (SocketException)
+        {
+            return string.Empty;
+        }
     }
 
     private static string? FindBackendDotEnv()

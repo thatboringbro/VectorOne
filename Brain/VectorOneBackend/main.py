@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hmac
 from pathlib import Path
 import sqlite3
@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from Controllers import analyzeArtifact
-from Models.payload import AnalystLogin, CommandRequest, EndpointHeartbeat, Payload
+from Models.payload import AgentHeartbeat, AnalystLogin, CommandRequest, EndpointHeartbeat, Payload
 from security import (
     authenticate_analyst,
     create_session,
@@ -85,10 +85,11 @@ def receive_telemetry(payload: Payload, _: None = Depends(require_agent_token)):
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO file_events
-                    (filename, username, filetype, datecreated, filehash, filepath, device_name, device_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
+                        (filename, username, filetype, datecreated, filehash, filepath, device_name, device_id,
+                         mitre_id, mitre_tactics)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
                     payload.filename,
                     payload.username,
                     payload.filetype,
@@ -97,6 +98,7 @@ def receive_telemetry(payload: Payload, _: None = Depends(require_agent_token)):
                     payload.filepath,
                     payload.device_name,
                     payload.device_id,
+                    *analyzeArtifact.mitre_metadata_for_verdict(verdict),
                 ),
             )
             inserted = cursor.rowcount > 0
@@ -140,12 +142,33 @@ def list_events(_: dict = Depends(get_current_analyst)):
     for (file_hash,) in missing_checks:
         analyzeArtifact.ensure_integrity_check(file_hash)
 
+    mitre_id, mitre_tactic = analyzeArtifact.MITRE_MAPPING["malicious"]
     with sqlite3.connect(DB_PATH) as connection:
+        connection.execute(
+            """
+            UPDATE file_events
+            SET mitre_id = (
+                    SELECT CASE WHEN checks.verdict IN ('malicious', 'suspicious')
+                                THEN ? ELSE NULL END
+                    FROM integrity_checks AS checks
+                    WHERE checks.filehash = file_events.filehash
+                ),
+                mitre_tactics = (
+                    SELECT CASE WHEN checks.verdict IN ('malicious', 'suspicious')
+                                THEN ? ELSE NULL END
+                    FROM integrity_checks AS checks
+                    WHERE checks.filehash = file_events.filehash
+                )
+            WHERE mitre_id IS NULL OR mitre_tactics IS NULL
+            """,
+            (mitre_id, mitre_tactic),
+        )
         connection.row_factory = sqlite3.Row
         rows = connection.execute(
             """
             SELECT event.id, event.filename, event.username, event.filetype,
                    event.datecreated, event.filehash, event.filepath, event.device_name,
+                   event.mitre_id, event.mitre_tactics,
                    COALESCE(checks.verdict, 'unknown') AS verdict,
                    checks.virustotal_result, checks.abuse_ch_result,
                    (
@@ -194,6 +217,74 @@ def list_endpoints(_: dict = Depends(get_current_analyst)):
             """
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+@app.post("/api/agents/heartbeat")
+def agent_heartbeat(heartbeat: AgentHeartbeat, _: None = Depends(require_agent_token)):
+    agent_id = heartbeat.agent_id.strip()
+    hostname = heartbeat.hostname.strip()
+    if not agent_id or not hostname:
+        raise HTTPException(status_code=422, detail="agent_id and hostname are required")
+
+    last_seen = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as connection:
+        connection.execute(
+            """
+            INSERT INTO agents (agent_id, hostname, ip_address, os_version, status, last_seen)
+            VALUES (?, ?, ?, ?, 'online', ?)
+            ON CONFLICT(agent_id) DO UPDATE SET
+                hostname = excluded.hostname,
+                ip_address = excluded.ip_address,
+                os_version = excluded.os_version,
+                status = 'online',
+                last_seen = excluded.last_seen
+            """,
+            (
+                agent_id,
+                hostname,
+                heartbeat.ip_address.strip(),
+                heartbeat.os_version.strip(),
+                last_seen,
+            ),
+        )
+    return {"status": "online", "agent_id": agent_id, "last_seen": last_seen}
+
+
+@app.get("/api/agents")
+def list_agents(_: dict = Depends(get_current_analyst)):
+    now = datetime.now(timezone.utc)
+    offline_before = now - timedelta(seconds=180)
+    with sqlite3.connect(DB_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            "SELECT agent_id, hostname, ip_address, os_version, status, last_seen FROM agents"
+        ).fetchall()
+        statuses = {}
+        for row in rows:
+            last_seen = datetime.fromisoformat(row["last_seen"].replace("Z", "+00:00"))
+            if last_seen.tzinfo is None:
+                last_seen = last_seen.replace(tzinfo=timezone.utc)
+            else:
+                last_seen = last_seen.astimezone(timezone.utc)
+            status = "offline" if last_seen < offline_before else "online"
+            statuses[row["agent_id"]] = status
+            if status != row["status"]:
+                connection.execute(
+                    "UPDATE agents SET status = ? WHERE agent_id = ?",
+                    (status, row["agent_id"]),
+                )
+
+        return [
+            {
+                "agent_id": row["agent_id"],
+                "hostname": row["hostname"],
+                "ip_address": row["ip_address"],
+                "os_version": row["os_version"],
+                "status": statuses[row["agent_id"]],
+                "last_seen": row["last_seen"],
+            }
+            for row in rows
+        ]
 
 
 @app.post("/api/endpoints/heartbeat")
@@ -311,4 +402,3 @@ def complete_command(command_id: int, _: None = Depends(require_agent_token)):
             if row is None:
                 raise HTTPException(status_code=404, detail="command not found")
     return {"id": command_id, "status": "completed"}
-
