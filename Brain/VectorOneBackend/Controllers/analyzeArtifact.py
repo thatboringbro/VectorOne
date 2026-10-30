@@ -2,6 +2,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlencode
 from urllib import error, request
 from dotenv import dotenv_values
 
@@ -136,10 +137,19 @@ def _get_api_key(*names: str) -> str | None:
     return None
 
 
-def _request_json(url: str, headers: dict[str, str] | None = None, method: str = "GET", payload: dict | None = None):
+def _request_json(
+    url: str,
+    headers: dict[str, str] | None = None,
+    method: str = "GET",
+    payload: dict | None = None,
+    form_payload: bool = False,
+):
     data = None
     if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
+        if form_payload:
+            data = urlencode(payload).encode("utf-8")
+        else:
+            data = json.dumps(payload).encode("utf-8")
 
     req = request.Request(url, data=data, headers=headers or {}, method=method)
 
@@ -191,9 +201,10 @@ def check_abuse_ch(file_hash: str) -> dict:
     url = "https://mb-api.abuse.ch/api/v1/"
     response = _request_json(
         url,
-        headers={"Auth-Key": api_key, "Content-Type": "application/json"},
+        headers={"Auth-Key": api_key, "Content-Type": "application/x-www-form-urlencoded"},
         method="POST",
         payload={"query": "get_info", "hash": file_hash},
+        form_payload=True,
     )
 
     if not response.get("ok"):

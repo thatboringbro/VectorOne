@@ -47,21 +47,9 @@ The current MITRE ATT&CK mapping associates malicious and suspicious file observ
 
 API credentials and the shared agent token are configured locally in `Brain/VectorOneBackend/.env`. The repository `.gitignore` excludes `.env`; **do not commit real credentials**. The provided template is [`Brain/VectorOneBackend/.env.example`](./Brain/VectorOneBackend/.env.example).
 
-From the backend directory, copy the template and edit the new `.env` file with your own provider credentials and a newly generated random agent token:
+Run `python configure.py` from the repository root to create the local `.env` file. The setup script generates a secure agent token and prompts for optional provider credentials; leave either prompt blank to skip that provider.
 
-```dotenv
-VIRUSTOTAL_API_KEY="your_virustotal_api_key_here"
-ABUSE_CH_API_KEY="your_abuse_ch_api_key_here"
-VECTORONE_AGENT_TOKEN=generate_your_own_vectorone_agent_token_here
-```
-
-Replace every placeholder. `ABUSE_CH_API_KEY` is sent as the MalwareBazaar `Auth-Key` header. The Brain and Agent read `VECTORONE_AGENT_TOKEN` from this same file; they will not accept agent traffic if it is missing. For example, generate a token with:
-
-```bash
-openssl rand -hex 32
-```
-
-Then place its output in `.env` as the value of `VECTORONE_AGENT_TOKEN`. If a threat-intelligence key is not configured, that provider's lookup is unavailable; the backend can still run, but results will not include that source.
+`ABUSE_CH_API_KEY` is sent as the MalwareBazaar `Auth-Key` header. The Brain and Agent read `VECTORONE_AGENT_TOKEN` from the same file; they will not accept agent traffic if it is missing. If a threat-intelligence key is not configured, that provider's lookup is unavailable; the backend can still run, but results will not include that source.
 
 > Keep `.env.example` as a template with placeholders. The `.env` file is the local, ignored configuration file. Restart the Brain and Agent after changing credentials so both processes reload the file.
 
@@ -75,69 +63,30 @@ Then place its output in `.env` as the value of `VECTORONE_AGENT_TOKEN`. If a th
 - Optional: API credentials for VirusTotal and Abuse.ch MalwareBazaar
 - For safely testing response actions: a disposable VM or test machine with nonessential sample files
 
-### 1. Configure and run the Brain
+### 1. Configure VectorOne
+
+```bash
+python configure.py
+```
+
+The script creates the Brain virtual environment, installs Brain and Console dependencies, restores Agent packages, writes `Brain/VectorOneBackend/.env`, and can create your first analyst account immediately. It requires Python 3.10+, Node.js/npm, and the .NET 8 SDK.
+
+### 2. Start the platform
+
+```bash
+python vector_one.py start
+```
+
+The controller launches the Brain, Console, and Agent together. Press Ctrl+C or run `python vector_one.py stop` when done. The Console URL is typically [http://localhost:5173](http://localhost:5173), and the Brain API documentation is at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
+
+If you skip the prompted analyst setup during `python configure.py`, you can create one later from another terminal while the platform is running:
 
 ```bash
 cd Brain/VectorOneBackend
-python3 -m venv venv
-source venv/bin/activate
-python -m pip install -r requirements.txt
-cp .env.example .env
-```
-
-In Windows PowerShell, activate the environment with `.\venv\Scripts\Activate.ps1` and copy the template with `Copy-Item .env.example .env`.
-
-Edit `Brain/VectorOneBackend/.env` as described above, then start the API from `Brain/VectorOneBackend`:
-
-```bash
-uvicorn main:app --reload --host 127.0.0.1 --port 8000
-```
-
-The Brain initializes its SQLite tables in `vectorone_brain.db` when it starts. Keep this terminal running. The API documentation is available at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
-
-### 2. Create a local analyst account
-
-Analyst registration is not exposed in the Console. In another terminal, create an account interactively:
-
-```bash
-cd Brain/VectorOneBackend
-source venv/bin/activate
 python create_analyst.py
 ```
 
-Enter the requested identity details and a password of at least 12 characters. Sign in with this account in the Console.
-
-### 3. Run the SOC Console
-
-In another terminal:
-
-```bash
-cd Console
-npm install
-npm run dev
-```
-
-Open the local URL printed by Vite (typically [http://localhost:5173](http://localhost:5173)) and sign in. By default, the Console uses the Brain at `http://127.0.0.1:8000`. To point it elsewhere, create `Console/.env.local`:
-
-```dotenv
-VITE_API_BASE_URL=http://127.0.0.1:8000
-```
-
-### 4. Build and run the Agent
-
-Start the Agent from the repository root so it can locate the shared `Brain/VectorOneBackend/.env` file:
-
-```bash
-dotnet run --project Agent/VectorOne/VectorOne.csproj
-```
-
-The Agent requires `VECTORONE_AGENT_TOKEN` to be set in that shared `.env` file. It connects to `http://127.0.0.1:8000` by default. To use another Brain address, add the full telemetry endpoint to the same `.env` file and restart the Agent:
-
-```dotenv
-VECTORONE_API_URL=http://127.0.0.1:8000/api/telemetry
-```
-
-The Agent derives its command and heartbeat endpoints from that URL's origin. It creates a persistent agent ID in the user's application-data directory when possible. Keep the Agent running to see heartbeats and file events appear in the Console.
+Then sign in to the Console. The Agent connects to `http://127.0.0.1:8000` by default; to use another Brain address, add `VECTORONE_API_URL` with the full telemetry endpoint to `Brain/VectorOneBackend/.env`.
 
 ### Optional build and test commands
 

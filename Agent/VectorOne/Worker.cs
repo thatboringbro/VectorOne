@@ -144,7 +144,23 @@ public class Worker : BackgroundService
         {
             TryAdd(Path.Combine(userProfile, "Downloads"));
         }
+
+        string? documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        if (string.IsNullOrWhiteSpace(documents) ||
+            (!string.IsNullOrWhiteSpace(userProfile) &&
+             string.Equals(Path.GetFullPath(documents), Path.GetFullPath(userProfile), StringComparison.OrdinalIgnoreCase)))
+        {
+            documents = string.IsNullOrWhiteSpace(userProfile)
+                ? null
+                : Path.Combine(userProfile, "Documents");
+        }
+        TryAdd(documents);
+
         TryAdd(Path.GetTempPath());
+        if (OperatingSystem.IsLinux())
+        {
+            TryAdd(Path.Combine(Path.DirectorySeparatorChar.ToString(), "tmp"));
+        }
 
         var localApplicationData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (!string.IsNullOrWhiteSpace(localApplicationData))

@@ -15,11 +15,27 @@ public class WorkerTests
             string.Equals(Path.GetFullPath(path), Path.GetFullPath(Path.GetTempPath()), StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(directories, path =>
             string.Equals(Path.GetFullPath(path), Path.GetFullPath(userProfile), StringComparison.OrdinalIgnoreCase));
+        var documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        if (string.IsNullOrWhiteSpace(documents) ||
+            string.Equals(Path.GetFullPath(documents), Path.GetFullPath(userProfile), StringComparison.OrdinalIgnoreCase))
+        {
+            documents = Path.Combine(userProfile, "Documents");
+        }
+        if (Directory.Exists(documents))
+        {
+            Assert.Contains(directories, path =>
+                string.Equals(Path.GetFullPath(path), Path.GetFullPath(documents), StringComparison.OrdinalIgnoreCase));
+        }
         var downloads = Path.Combine(userProfile, "Downloads");
         if (Directory.Exists(downloads))
         {
             Assert.Contains(directories, path =>
                 string.Equals(Path.GetFullPath(path), Path.GetFullPath(downloads), StringComparison.OrdinalIgnoreCase));
+        }
+        if (OperatingSystem.IsLinux() && Directory.Exists("/tmp"))
+        {
+            Assert.Contains(directories, path =>
+                string.Equals(Path.GetFullPath(path), Path.GetFullPath("/tmp"), StringComparison.OrdinalIgnoreCase));
         }
         if (OperatingSystem.IsLinux())
         {

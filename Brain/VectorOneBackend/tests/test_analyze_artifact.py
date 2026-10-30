@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from fastapi.security import HTTPAuthorizationCredentials
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -49,7 +49,37 @@ class AnalyzeArtifactTests(unittest.TestCase):
         self.assertTrue(result["malicious"])
         self.assertEqual(result["query_status"], "ok")
         self.assertEqual(result["results"][0]["signature"], "test-family")
-        mock_request.assert_called_once()
+        mock_request.assert_called_once_with(
+            "https://mb-api.abuse.ch/api/v1/",
+            headers={"Auth-Key": "test-key", "Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+            payload={"query": "get_info", "hash": "A1B2C3"},
+            form_payload=True,
+        )
+
+    @patch("Controllers.analyzeArtifact.request.urlopen")
+    def test_request_json_encodes_form_payload_as_urlencoded_data(self, mock_urlopen):
+        from Controllers.analyzeArtifact import _request_json
+
+        response = MagicMock()
+        response.read.return_value = b'{"query_status":"ok","data":[]}'
+        mock_urlopen.return_value.__enter__.return_value = response
+
+        result = _request_json(
+            "https://mb-api.abuse.ch/api/v1/",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+            payload={"query": "get_info", "hash": "a1b2c3"},
+            form_payload=True,
+        )
+
+        sent_request = mock_urlopen.call_args.args[0]
+        self.assertEqual(sent_request.data, b"query=get_info&hash=a1b2c3")
+        self.assertEqual(
+            sent_request.get_header("Content-type"),
+            "application/x-www-form-urlencoded",
+        )
+        self.assertEqual(result, {"ok": True, "data": {"query_status": "ok", "data": []}})
 
     @patch("Controllers.analyzeArtifact._get_api_key", return_value="test-key")
     @patch(
