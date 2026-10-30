@@ -12,6 +12,10 @@ Many security labs teach log analysis well, but stop short of showing how endpoi
 
 > “The community progresses when elders plant trees whose shade they won't sit under.”
 
+
+![VectorOne Homepage](/img/vectorone_homepage.png)
+
+
 ## What VectorOne does
 
 - Watches selected high-risk filesystem locations and reports new-file metadata, including SHA-256 hashes.
@@ -42,6 +46,8 @@ The Agent skips common partial-download and temporary files, hidden dotfiles, an
 4. An analyst can queue a response action; the Agent polls for it, checks that the target is in a watched directory, processes it, and acknowledges completion.
 
 The current MITRE ATT&CK mapping associates malicious and suspicious file observations with **T1204.002**. This is a contextual learning aid, not a full technique-detection engine.
+
+![VectorOne Detection & Response](/img/vectorone_detection_page.png)
 
 ## API keys and local configuration
 
@@ -139,7 +145,7 @@ These are planned directions for community contributions, not all shipped featur
 - Expand MITRE ATT&CK coverage and add richer technique/tactic context beyond the current T1204.002 mapping.
 - Implement true encrypted file isolation, with explicit restore workflows and audit history; replace the current destructive “quarantine” behavior.
 - Add YARA and Sigma detection-rule parsing and explainable rule matches.
-- Improve setup, packaging, and cross-platform service installation for lab deployments.
+- Add logging and support telemetry shipment to SIEM .
 - Add more provider integrations and configurable cache-expiration policies.
 
 ## Contributing
