@@ -64,8 +64,13 @@ Run `python configure.py` from the repository root to create the local `.env` fi
 ### Prerequisites
 
 - Python 3.10 or newer
-- Node.js and npm
-- .NET 8 SDK
+- [Node.js LTS](https://nodejs.org/) (includes npm; ensure **Add to PATH** is checked during installation)
+- .NET 8 SDK (v8.0.428)
+		- Windows: [Download the x64 installer](https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.428/dotnet-sdk-8.0.428-win-x64.exe)
+		- Linux / macOS: use the official [Microsoft .NET Install Scripts](https://dotnet.microsoft.com/en-us/download/dotnet/scripts):
+```bash
+curl -sSL https://builds.dotnet.microsoft.com/dotnet/scripts/v1/dotnet-install.sh | bash -s -- --channel 8.0
+```
 - Optional: API credentials for VirusTotal and Abuse.ch MalwareBazaar
 - For safely testing response actions: a disposable VM or test machine with nonessential sample files
 
@@ -145,7 +150,7 @@ These are planned directions for community contributions, not all shipped featur
 - Expand MITRE ATT&CK coverage and add richer technique/tactic context beyond the current T1204.002 mapping.
 - Implement true encrypted file isolation, with explicit restore workflows and audit history; replace the current destructive “quarantine” behavior.
 - Add YARA and Sigma detection-rule parsing and explainable rule matches.
-- Add logging and support telemetry shipment to SIEM .
+- Add logging and support telemetry shipment to SIEM.
 - Add more provider integrations and configurable cache-expiration policies.
 
 ## Contributing
